@@ -319,3 +319,71 @@ class TestGDELTResilience:
             d = item.model_dump()
             reconstructed = NewsItem(**d)
             assert reconstructed.news_id == item.news_id
+
+    def test_user_agent_header_sent(self):
+        captured_headers = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal captured_headers
+            captured_headers = dict(request.headers)
+            return httpx.Response(200, json=sample_gdelt_payload())
+
+        client = make_mock_client(handler)
+        provider = GDELTNewsProvider(client=client, user_agent="CustomUserAgent/1.0", min_request_interval=0.0)
+
+        provider.fetch_news("AAPL", "Apple Inc.")
+        assert "user-agent" in captured_headers
+        assert captured_headers["user-agent"] == "CustomUserAgent/1.0"
+
+    def test_http_429_rate_limit_retry_and_success(self):
+        call_count = 0
+        slept_times = []
+
+        def mock_sleep(duration: float):
+            slept_times.append(duration)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return httpx.Response(429, headers={"Retry-After": "2"})
+            return httpx.Response(200, json=sample_gdelt_payload())
+
+        client = make_mock_client(handler)
+        provider = GDELTNewsProvider(
+            client=client,
+            max_retries=3,
+            min_request_interval=0.0,
+            sleep_fn=mock_sleep,
+        )
+
+        items = provider.fetch_news("AAPL", "Apple Inc.")
+        assert len(items) == 2
+        assert call_count == 2
+        assert slept_times == [2.0]
+
+    def test_http_429_retries_exhausted_returns_empty_list(self):
+        call_count = 0
+        slept_times = []
+
+        def mock_sleep(duration: float):
+            slept_times.append(duration)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            return httpx.Response(429)
+
+        client = make_mock_client(handler)
+        provider = GDELTNewsProvider(
+            client=client,
+            max_retries=3,
+            min_request_interval=0.0,
+            sleep_fn=mock_sleep,
+        )
+
+        items = provider.fetch_news("AAPL", "Apple Inc.")
+        assert items == []
+        assert call_count == 3
+        assert len(slept_times) == 2
+        assert slept_times == [5.0, 10.0]

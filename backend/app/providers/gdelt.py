@@ -5,6 +5,12 @@ GDELTNewsProvider — GDELT DOC API v2 news provider implementation.
 
 Queries GDELT for recent news items matching a stock ticker and company name,
 normalizes GDELT article data, and produces valid NewsItem Pydantic models.
+
+Resilience:
+- User-Agent header included in all HTTP requests.
+- Minimum rate-limiting interval between outgoing requests per provider instance.
+- Bounded retries with exponential backoff & Retry-After header handling for HTTP 429.
+- Graceful exception handling; safely returns [] on exhausted retries without crashing the monitoring worker.
 """
 
 from __future__ import annotations
@@ -12,8 +18,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 import httpx
 from pydantic import ValidationError
@@ -22,6 +29,10 @@ from backend.app.models.news import NewsItem
 from backend.app.providers.base import NewsProvider
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_USER_AGENT = (
+    "SentimentDrivenStockScreener/1.0 (Financial News Ingestion Service)"
+)
 
 
 def parse_gdelt_date(date_str: str) -> datetime:
@@ -64,7 +75,7 @@ def parse_gdelt_date(date_str: str) -> datetime:
 
 class GDELTNewsProvider(NewsProvider):
     """
-    NewsProvider implementation for GDELT DOC API v2.
+    NewsProvider implementation for GDELT DOC API v2 with rate-limiting and retry resilience.
     """
 
     def __init__(
@@ -72,10 +83,31 @@ class GDELTNewsProvider(NewsProvider):
         base_url: str = "https://api.gdeltproject.org/api/v2/doc/doc",
         timeout: float = 10.0,
         client: Optional[httpx.Client] = None,
+        user_agent: str = DEFAULT_USER_AGENT,
+        max_retries: int = 3,
+        min_request_interval: float = 5.0,
+        sleep_fn: Optional[Callable[[float], None]] = None,
     ):
         self.base_url = base_url
         self.timeout = timeout
         self._client = client
+        self.user_agent = user_agent
+        self.max_retries = max(1, max_retries)
+        self.min_request_interval = max(0.0, min_request_interval)
+        self.sleep_fn = sleep_fn or time.sleep
+        self._last_request_time: float = 0.0
+
+    def _enforce_rate_limit(self) -> None:
+        if self.min_request_interval <= 0.0:
+            return
+        now = time.monotonic()
+        if self._last_request_time > 0:
+            elapsed = now - self._last_request_time
+            if elapsed < self.min_request_interval:
+                wait_time = self.min_request_interval - elapsed
+                logger.debug("Rate limiting GDELT request: waiting %.2fs...", wait_time)
+                self.sleep_fn(wait_time)
+        self._last_request_time = time.monotonic()
 
     def fetch_news(
         self,
@@ -99,19 +131,87 @@ class GDELTNewsProvider(NewsProvider):
             "format": "json",
         }
 
-        try:
-            if self._client is not None:
-                response = self._client.get(self.base_url, params=params, timeout=self.timeout)
+        headers = {
+            "User-Agent": self.user_agent,
+        }
+
+        data: Optional[dict] = None
+
+        for attempt in range(1, self.max_retries + 1):
+            self._enforce_rate_limit()
+
+            try:
+                if self._client is not None:
+                    response = self._client.get(
+                        self.base_url,
+                        params=params,
+                        headers=headers,
+                        timeout=self.timeout,
+                    )
+                else:
+                    with httpx.Client(timeout=self.timeout) as client:
+                        response = client.get(
+                            self.base_url,
+                            params=params,
+                            headers=headers,
+                        )
+
+                if response.status_code == 429:
+                    retry_after = response.headers.get("Retry-After")
+                    backoff = 5.0 * attempt
+                    if retry_after:
+                        try:
+                            parsed_retry = float(retry_after.strip())
+                            if 0 < parsed_retry <= 30:
+                                backoff = parsed_retry
+                        except ValueError:
+                            pass
+
+                    logger.warning(
+                        "GDELT API HTTP 429 Rate Limited for symbol=%s (attempt %d/%d). Waiting %.1fs...",
+                        clean_symbol,
+                        attempt,
+                        self.max_retries,
+                        backoff,
+                    )
+                    if attempt < self.max_retries:
+                        self.sleep_fn(backoff)
+                        continue
+                    else:
+                        logger.warning(
+                            "GDELT API retries exhausted for symbol=%s; safely returning empty list.",
+                            clean_symbol,
+                        )
+                        return []
+
                 response.raise_for_status()
                 data = response.json()
-            else:
-                with httpx.Client(timeout=self.timeout) as client:
-                    response = client.get(self.base_url, params=params)
-                    response.raise_for_status()
-                    data = response.json()
-        except (httpx.HTTPError, httpx.RequestError, httpx.TimeoutException, json.JSONDecodeError, Exception) as exc:
-            logger.warning("GDELT API request failed for symbol=%s: %s", clean_symbol, exc)
-            return []
+                logger.info(
+                    "GDELT API request succeeded for symbol=%s (HTTP %d, attempt %d)",
+                    clean_symbol,
+                    response.status_code,
+                    attempt,
+                )
+                break
+
+            except (httpx.HTTPError, httpx.RequestError, httpx.TimeoutException, json.JSONDecodeError, Exception) as exc:
+                backoff = 2.0 * attempt
+                logger.warning(
+                    "GDELT API request failed for symbol=%s (attempt %d/%d): %s",
+                    clean_symbol,
+                    attempt,
+                    self.max_retries,
+                    exc,
+                )
+                if attempt < self.max_retries:
+                    self.sleep_fn(backoff)
+                else:
+                    logger.warning(
+                        "GDELT API max retries (%d) reached for symbol=%s; returning empty list.",
+                        self.max_retries,
+                        clean_symbol,
+                    )
+                    return []
 
         if not isinstance(data, dict):
             return []
