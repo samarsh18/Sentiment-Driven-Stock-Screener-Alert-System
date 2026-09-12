@@ -251,12 +251,14 @@ class PipelineAnalyzeResponse(BaseModel):
     sentiment_score: float
     impact: str
     severity_label: str
+    historical_sample_size: int = 0
     confidence: float
     evidence_strength: str
     action: str
     should_alert: bool
     reason: str
     alert_id: Optional[str] = None
+
 
 
 # ---------------------------------------------------------------------------

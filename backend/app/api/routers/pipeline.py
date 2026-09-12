@@ -11,6 +11,7 @@ structured result. Optionally persists an AlertRecord.
 """
 from __future__ import annotations
 
+import os
 import uuid
 
 from fastapi import APIRouter, Depends, status
@@ -23,6 +24,7 @@ from backend.app.api.schemas import (
     severity_label_to_int,
 )
 from backend.app.database.repository import create_alert
+from backend.app.database.seed_historical_events import get_seeded_historical_events
 from backend.app.models.news import NewsItem
 from backend.app.services.news_relevance import StockMetadata
 from backend.app.services.pipeline import StockNewsPipeline
@@ -44,6 +46,10 @@ def analyze_news(body: PipelineAnalyzeRequest, db: Session = Depends(get_db)):
     The caller may supply pre-computed AI analysis (sentiment, event_type, etc.)
     via optional fields. These are injected into the pipeline as a mock AI analyzer
     so that the API remains fully offline and deterministic.
+
+    When USE_SEED_HISTORICAL_EVENTS is enabled (default: true), a deterministic
+    seed pool of historical event observations is supplied to the historical matcher,
+    enabling full statistical event-study evaluation during live demonstrations.
 
     If persist_alert=True and should_alert=True in the result, an AlertRecord
     is written to the database.
@@ -82,9 +88,16 @@ def analyze_news(body: PipelineAnalyzeRequest, db: Session = Depends(get_db)):
     def _precomputed_analyzer(_item):
         return ai_data
 
+    # Load seed pool of historical event observations if seed mode is active
+    historical_events = None
+    use_seed_raw = os.getenv("USE_SEED_HISTORICAL_EVENTS", "true").strip().lower()
+    if use_seed_raw not in ("false", "0", "no", "off"):
+        historical_events = get_seeded_historical_events()
+
     result = _pipeline.process_news_item(
         item=news_item,
         metadata=metadata,
+        historical_events=historical_events,
         ai_analyzer=_precomputed_analyzer,
     )
 
@@ -113,6 +126,7 @@ def analyze_news(body: PipelineAnalyzeRequest, db: Session = Depends(get_db)):
         sentiment_score=result.sentiment_score,
         impact=result.impact,
         severity_label=result.severity,
+        historical_sample_size=result.historical_sample_size,
         confidence=result.confidence,
         evidence_strength=result.evidence_strength,
         action=result.action,

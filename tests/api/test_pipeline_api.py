@@ -121,3 +121,49 @@ class TestPipelineAnalyze:
         conf = res.json()["confidence"]
         assert isinstance(conf, float)
         assert 0.0 <= conf <= 1.0
+
+    def test_seed_mode_enabled_populates_historical_evidence(self, client, monkeypatch):
+        monkeypatch.setenv("USE_SEED_HISTORICAL_EVENTS", "true")
+        payload = {
+            "news_item": BASE_NEWS,
+            "stock_metadata": BASE_META,
+            "ai_sentiment": "positive",
+            "ai_sentiment_score": 0.90,
+            "ai_event_type": "EARNINGS_RELEASE",
+            "ai_impact": "HIGH",
+            "ai_severity": "LOW",
+            "gemini_confidence": 0.85,
+        }
+        res = client.post("/api/pipeline/analyze", json=payload)
+        assert res.status_code == 200
+        data = res.json()
+        assert data["relevant"] is True
+        assert data["historical_sample_size"] >= 30
+        assert data["confidence"] > 0.60
+        assert data["evidence_strength"] in ("STRONG", "MODERATE")
+        assert data["action"] in ("BUY", "ALERT_POSITIVE")
+        assert data["should_alert"] is True
+
+    def test_seed_mode_disabled_fallback_to_insufficient_evidence(self, client, monkeypatch):
+        monkeypatch.setenv("USE_SEED_HISTORICAL_EVENTS", "false")
+        payload = {
+            "news_item": BASE_NEWS,
+            "stock_metadata": BASE_META,
+            "ai_sentiment": "neutral",
+            "ai_sentiment_score": 0.50,
+            "ai_event_type": "EARNINGS_RELEASE",
+            "ai_impact": "LOW",
+            "ai_severity": "LOW",
+            "gemini_confidence": 0.50,
+        }
+        res = client.post("/api/pipeline/analyze", json=payload)
+        assert res.status_code == 200
+        data = res.json()
+        assert data["relevant"] is True
+        assert data["historical_sample_size"] == 0
+        assert data["confidence"] == 0.20
+        assert data["evidence_strength"] == "INSUFFICIENT"
+        assert data["action"] == "NO_ACTION"
+        assert data["should_alert"] is False
+        assert "Insufficient historical observations" in data["reason"]
+

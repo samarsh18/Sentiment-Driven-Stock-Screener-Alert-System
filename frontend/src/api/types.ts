@@ -152,6 +152,7 @@ export interface PipelineAnalyzeResponse {
   sentiment_score: number;
   impact: string;
   severity_label: SeverityLabel;
+  historical_sample_size?: number;
   confidence: number;
   evidence_strength: EvidenceStrength;
   action: Action;
