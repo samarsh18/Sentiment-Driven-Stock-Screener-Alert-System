@@ -1,4 +1,4 @@
-﻿"""
+"""
 backend/app/database/config.py
 -------------------------------
 Database engine and session configuration.
@@ -74,3 +74,16 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def init_db(target_engine=None):
+    """
+    Create all database tables registered on Base.metadata.
+
+    Safe to call multiple times (tables are created IF NOT EXISTS).
+    Does not delete existing data.
+    """
+    from backend.app.database.models import Base
+
+    e = target_engine or engine
+    Base.metadata.create_all(bind=e)
