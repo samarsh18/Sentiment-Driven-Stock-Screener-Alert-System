@@ -56,7 +56,7 @@ export async function apiRequest<T>(
     }
     // Network / server connection error
     throw new ApiError(
-      'Backend API unavailable. Make sure FastAPI server is running on http://localhost:8000',
+      `Backend API unavailable. Make sure FastAPI server is running on ${API_BASE_URL}`,
       0,
       'NETWORK_ERROR'
     );
