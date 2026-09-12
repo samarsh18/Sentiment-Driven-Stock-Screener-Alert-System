@@ -21,6 +21,7 @@ from backend.app.database.models import (
     AlertRecord,
     HistoricalPrice,
     NewsRecord,
+    NotificationDelivery,
     User,
     WatchlistItem,
 )
@@ -399,3 +400,100 @@ def _parse_filter_date(val: Union[datetime, date, str]) -> Optional[datetime]:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# 5. Monitor Support Repository
+# ---------------------------------------------------------------------------
+
+def get_active_users_with_watchlists(db: Session) -> List[tuple[User, List[WatchlistItem]]]:
+    """
+    Load all active users together with their watchlist items in one query.
+
+    Returns a list of (User, [WatchlistItem, ...]) tuples.
+    Users with empty watchlists are excluded.
+    """
+    users = (
+        db.query(User)
+        .filter(User.is_active == True)  # noqa: E712
+        .all()
+    )
+    result = []
+    for user in users:
+        items = (
+            db.query(WatchlistItem)
+            .filter(WatchlistItem.user_id == user.id)
+            .all()
+        )
+        if items:
+            result.append((user, items))
+    return result
+
+
+def get_notification_delivery(
+    db: Session, alert_id: str, user_id: int, channel: str
+) -> Optional[NotificationDelivery]:
+    """
+    Look up an existing notification delivery record.
+
+    Returns the existing record if found, None otherwise.
+    Used by NotificationService for idempotency checks.
+    """
+    return (
+        db.query(NotificationDelivery)
+        .filter(
+            NotificationDelivery.alert_id == alert_id,
+            NotificationDelivery.user_id == user_id,
+            NotificationDelivery.channel == channel,
+        )
+        .first()
+    )
+
+
+def create_notification_delivery(
+    db: Session,
+    alert_id: str,
+    user_id: int,
+    channel: str,
+    status: str,
+    error_message: Optional[str] = None,
+) -> Optional[NotificationDelivery]:
+    """
+    Persist a notification delivery record.
+
+    Returns the newly created record, or the existing record if the
+    (alert_id, user_id, channel) combination is already present (idempotent).
+
+    Parameters
+    ----------
+    status : str
+        "sent" or "failed".
+    error_message : Optional[str]
+        Error details when status is "failed".
+    """
+    from datetime import datetime, timezone
+
+    existing = get_notification_delivery(db, alert_id, user_id, channel)
+    if existing:
+        return existing
+
+    record = NotificationDelivery(
+        alert_id=alert_id,
+        user_id=user_id,
+        channel=channel,
+        status=status,
+        error_message=error_message,
+        sent_at=datetime.now(timezone.utc) if status == "sent" else None,
+    )
+    db.add(record)
+    try:
+        db.commit()
+        db.refresh(record)
+        return record
+    except Exception as exc:
+        db.rollback()
+        logger.warning(
+            "Failed to persist notification delivery for alert_id=%s user_id=%s channel=%s: %s",
+            alert_id, user_id, channel, exc,
+        )
+        return None
