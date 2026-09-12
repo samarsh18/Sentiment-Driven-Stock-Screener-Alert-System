@@ -44,10 +44,29 @@ ALLOWED_ORIGINS: list[str] = [o.strip() for o in _raw_origins.split(",") if o.st
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    """Initialise the database on startup, clean up on shutdown."""
+    """Initialise the database on startup, start background monitor if enabled, clean up on shutdown."""
     logger.info("Starting up — initialising database tables.")
     init_db()
+
+    monitor = None
+    enabled_raw = os.getenv("MONITOR_ENABLED", "false").strip().lower()
+    if enabled_raw not in ("false", "0", "no", "off"):
+        logger.info("MONITOR_ENABLED is active — starting 24/7 background monitor.")
+        from backend.app.api.routers.monitor import set_global_monitor
+        from backend.app.services.monitor import StockMonitor
+
+        monitor = StockMonitor()
+        set_global_monitor(monitor)
+        monitor.start()
+    else:
+        logger.info("MONITOR_ENABLED is false — background monitor not started.")
+
     yield
+
+    if monitor is not None:
+        logger.info("Shutting down — stopping background monitor.")
+        await monitor.stop()
+
     logger.info("Shutting down.")
 
 
@@ -85,7 +104,15 @@ def create_app() -> FastAPI:
         )
 
     # Routers
-    from backend.app.api.routers import alerts, news, pipeline, stocks, users, watchlist
+    from backend.app.api.routers import (
+        alerts,
+        monitor,
+        news,
+        pipeline,
+        stocks,
+        users,
+        watchlist,
+    )
 
     application.include_router(users.router)
     application.include_router(watchlist.router)
@@ -93,6 +120,7 @@ def create_app() -> FastAPI:
     application.include_router(alerts.router)
     application.include_router(stocks.router)
     application.include_router(pipeline.router)
+    application.include_router(monitor.router)
 
     # Health check (no prefix, so not behind /api)
     @application.get("/health", tags=["Health"])

@@ -233,3 +233,49 @@ class HistoricalPrice(Base):
             f"<HistoricalPrice id={self.id} symbol={self.symbol!r} "
             f"exchange={self.exchange!r} timestamp={self.timestamp.isoformat()}>"
         )
+
+
+# ---------------------------------------------------------------------------
+# NotificationDelivery
+# ---------------------------------------------------------------------------
+
+class NotificationDelivery(Base):
+    """
+    Idempotency record for outgoing notifications.
+
+    Ensures the same alert is never sent twice to the same user via the same
+    channel, even if the monitor processes the same news across multiple cycles.
+
+    Unique constraint: (alert_id, user_id, channel)
+      - alert_id  — references AlertRecord.alert_id (not a FK to keep it loose)
+      - user_id   — references users.id
+      - channel   — e.g. "console", "email"
+      - status    — "sent" | "failed"
+    """
+
+    __tablename__ = "notification_deliveries"
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    alert_id: str = Column(String(255), nullable=False, index=True)
+    user_id: int = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    channel: str = Column(String(50), nullable=False)   # e.g. "console", "email"
+    status: str = Column(String(20), nullable=False)     # "sent" | "failed"
+    error_message: str = Column(Text, nullable=True)
+    sent_at: datetime = Column(DateTime, nullable=True)
+    created_at: datetime = Column(
+        DateTime, server_default=func.now(), nullable=False
+    )
+
+    user = relationship("User", backref="notification_deliveries")
+
+    __table_args__ = (
+        UniqueConstraint("alert_id", "user_id", "channel", name="uq_alert_user_channel"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<NotificationDelivery id={self.id} alert_id={self.alert_id!r} "
+            f"user_id={self.user_id} channel={self.channel!r} status={self.status!r}>"
+        )
