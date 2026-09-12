@@ -123,9 +123,9 @@ export interface NewsItemInput {
   symbol: string;
   company_name: string;
   title: string;
-  content: str;
-  source: str;
-  url: str;
+  content: string;
+  source: string;
+  url: string;
   published_at: string;
 }
 
